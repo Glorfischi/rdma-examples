@@ -1,0 +1,23 @@
+---
+- hosts: localhost
+  tasks:
+  - name: "Build Server and client"
+    shell: "make"
+
+- hosts: all
+  tasks:
+  - name: "Create dir"
+    file: 
+      path: "{{ workdir }}/addFetch"
+      state: directory
+  - name: "Copy server binary"
+    copy:
+      src: server
+      dest: "{{ workdir }}/addFetch/server"
+      mode: '0755'
+  - name: "Copy client binary"
+    copy:
+      src: client
+      dest: "{{ workdir }}/addFetch/client"
+      mode: '0755'
+

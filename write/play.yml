@@ -1,0 +1,23 @@
+---
+- hosts: localhost
+  tasks:
+  - name: "Build Server and client"
+    shell: "make"
+
+- hosts: all
+  tasks:
+  - name: "Create dir"
+    file: 
+      path: "{{ workdir }}/write"
+      state: directory
+  - name: "Copy server binary"
+    copy:
+      src: server
+      dest: "{{ workdir }}/write/server"
+      mode: '0755'
+  - name: "Copy client binary"
+    copy:
+      src: client
+      dest: "{{ workdir }}/write/client"
+      mode: '0755'
+

@@ -1,0 +1,11 @@
+# Binaries
+client
+server
+
+# Language server
+.clangd/
+compile_commands.json
+
+# Vagrant
+.vagrant/
+

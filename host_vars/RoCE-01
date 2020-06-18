@@ -1,0 +1,5 @@
+---
+
+workdir: "/home/vagrant"
+
+rxe_eth_interface: ens6
