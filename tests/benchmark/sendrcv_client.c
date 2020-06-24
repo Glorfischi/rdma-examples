@@ -15,8 +15,10 @@ int main(int argc, char* argv[]){
 
   printf("Connected\n");
 
-  sleep(1);
+  sleep(1); // To "solve" race condition
   char *data = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   sr_conn_write(conn, data, 15);
+  char *data2 = "BBBBBBBBBBBBBBBBBBBBBBB";
+  sr_conn_write(conn, data2, 15);
   return 0;
 }

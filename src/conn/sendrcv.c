@@ -8,14 +8,26 @@
 
 #include "conn/sendrcv.h"
 
+
 struct sendRcvConn{
   struct rdma_addrinfo *addrinfo;
 
   struct rdma_cm_id* id;
   struct ibv_qp * qp;
 
+  struct ibv_qp_init_attr attr;
+  struct rdma_conn_param conn_param;
 
-  struct ibv_mr *mr;
+
+
+  size_t transfer_size; // The maximum size of a message
+
+  // ToDo(fabian): To support send bursts we would need to add multiple MRs
+  struct ibv_mr *snd_mr; // memory region for sending. 
+
+  struct ibv_mr **rcv_mrs; // List of memory regions to receive into
+  size_t rcv_mr_count; // Number of memory regions to receive into
+  size_t rcv_mr_next; // Memory region index we will read from next.
 };
 
 struct sendRcvListener{
@@ -73,48 +85,43 @@ int sr_listener_accept(SendRcvListener listener, SendRcvConn conn){
     return ret;
   }
   
-  // ToDo: Move to init
-  struct ibv_qp_init_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.cap.max_send_wr = 1;  // The maximum number of outstanding Work Requests that can be
-  //posted to the Send Queue in that Queue Pair
-  attr.cap.max_recv_wr = 2;  // The maximum number of outstanding Work Requests that can be
-  //posted to the Receive Queue in that Queue Pair. 
-  attr.cap.max_send_sge = 1; // The maximum number of scatter/gather elements in any Work 
-  //Request that can be posted to the Send Queue in that Queue Pair.
-  attr.cap.max_recv_sge = 1; // The maximum number of scatter/gather elements in any 
-  // Work Request that can be posted to the Receive Queue in that Queue Pair. 
-  attr.cap.max_inline_data = 0;
-  attr.qp_type = IBV_QPT_RC;
-
-  ret = rdma_create_qp(conn_id, NULL, &attr);
+  ret = rdma_create_qp(conn_id, NULL, &conn->attr);
   if (ret) {
     return ret;
   }
-
-  // ToDo: Move to init
-  struct rdma_conn_param conn_param;
-  memset(&conn_param, 0 , sizeof(conn_param));
-  conn_param.responder_resources = 0;  // The maximum number of outstanding RDMA read and atomic operations that the local side will accept from the remote side.
-  conn_param.initiator_depth =  0;  // The maximum number of outstanding RDMA read and atomic operations that the local side will have to the remote side.
-  conn_param.retry_count = 3;  
-  conn_param.rnr_retry_count = 3; 
-
   conn->id = conn_id;
   conn->qp = conn_id->qp;
   
-  ret = rdma_accept(conn_id, &conn_param);
+  ret = rdma_accept(conn->id, &conn->conn_param);
   if (ret) {
     return ret;
   }
 
-  // ToDo: Setup MR - How do we manage memory regions?
-  size_t buf_size = 4096;
-  char* buf = (char*)malloc(buf_size);
- 
-  struct ibv_mr * mr = ibv_reg_mr(conn_id->pd, buf, buf_size, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);  // konst: for Fabian 
-  conn->mr = mr;
+  char* buf = (char*)malloc(conn->transfer_size);
+  conn->snd_mr = ibv_reg_mr(conn_id->pd, buf, conn->transfer_size, 
+      IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);  
 
+  for (int i = conn->rcv_mr_next; i < conn->rcv_mr_count; i++){
+    char* buf = (char*)malloc(conn->transfer_size);
+    struct ibv_mr * mr = ibv_reg_mr(conn_id->pd, buf, conn->transfer_size, 
+        IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);  
+
+    struct ibv_sge sge;
+    sge.addr = (uintptr_t)mr->addr;
+    sge.length = conn->transfer_size;
+    sge.lkey = mr->lkey;
+
+    struct ibv_recv_wr wr, *bad;
+    wr.wr_id = 1;
+    wr.next = NULL;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+
+    ibv_post_recv(conn->qp, &wr, &bad);
+
+    conn->rcv_mrs[i] = mr;
+  }
+  
   return 0;
 }
 
@@ -125,6 +132,34 @@ int sr_listener_accept(SendRcvListener listener, SendRcvConn conn){
  */
 SendRcvConn sr_conn_init(){
   SendRcvConn conn = calloc(1, sizeof(struct sendRcvConn));
+
+  // ToDo: Parameterize
+  conn->transfer_size = 4096;
+
+  conn->rcv_mr_count = 5;
+  conn->rcv_mr_next = 0;
+  conn->rcv_mrs = calloc(conn->rcv_mr_count, sizeof(struct ibv_mr*));
+
+  memset(&conn->attr, 0, sizeof(conn->attr));
+  conn->attr.cap.max_send_wr = 1;  // The maximum number of outstanding Work Requests that can be
+  // posted to the Send Queue in that Queue Pair
+  conn->attr.cap.max_recv_wr = conn->rcv_mr_count;  // The maximum number of outstanding Work Requests that can be
+  // posted to the Receive Queue in that Queue Pair. 
+  conn->attr.cap.max_send_sge = 1; // The maximum number of scatter/gather elements in any Work 
+  // Request that can be posted to the Send Queue in that Queue Pair.
+  conn->attr.cap.max_recv_sge = 1; // The maximum number of scatter/gather elements in any 
+  // Work Request that can be posted to the Receive Queue in that Queue Pair. 
+  conn->attr.cap.max_inline_data = 0;
+  conn->attr.qp_type = IBV_QPT_RC;
+
+  memset(&conn->conn_param, 0 , sizeof(conn->conn_param));
+  conn->conn_param.responder_resources = 0;  // The maximum number of outstanding RDMA read and atomic operations that 
+  // the local side will accept from the remote side.
+  conn->conn_param.initiator_depth =  0;  // The maximum number of outstanding RDMA read and atomic operations that the 
+  // local side will have to the remote side.
+  conn->conn_param.retry_count = 3;  
+  conn->conn_param.rnr_retry_count = 3; 
+
   return conn;
 }
 
@@ -151,37 +186,21 @@ int sr_conn_dial(SendRcvConn conn, char *ip, int port) {
     return ret;
   } 
 
-  struct ibv_qp_init_attr attr;
-  memset(&attr, 0, sizeof(attr));
-  attr.cap.max_send_wr = 1;  // The maximum number of outstanding Work Requests that can be posted to the Send Queue in that Queue Pair
-  attr.cap.max_recv_wr = 2;  // The maximum number of outstanding Work Requests that can be posted to the Receive Queue in that Queue Pair. 
-  attr.cap.max_send_sge = 1; // The maximum number of scatter/gather elements in any Work Request that can be posted to the Send Queue in that Queue Pair.
-  attr.cap.max_recv_sge = 1; // The maximum number of scatter/gather elements in any Work Request that can be posted to the Receive Queue in that Queue Pair. 
-  attr.cap.max_inline_data = 0;
-  attr.qp_type = IBV_QPT_RC;
-
-  struct rdma_conn_param conn_param;
-  memset(&conn_param, 0 , sizeof(conn_param));
-  conn_param.responder_resources = 0;  // The maximum number of outstanding RDMA read and atomic operations that the local side will accept from the remote side.
-  conn_param.initiator_depth =  0;  // The maximum number of outstanding RDMA read and atomic operations that the local side will have to the remote side.
-  conn_param.retry_count = 3;  
-  conn_param.rnr_retry_count = 3; 
-  
   struct rdma_cm_id *id;
 
-  attr.qp_type = IBV_QPT_RC;
+  conn->attr.qp_type = IBV_QPT_RC;
 
   ret = rdma_create_ep(&id, conn->addrinfo, NULL, NULL); 
   if (ret) {
     return ret;
   }
 
-  ret = rdma_create_qp(id, NULL, &attr);
+  ret = rdma_create_qp(id, NULL, &conn->attr);
   if (ret) {
     return ret;
   }
       
-  ret = rdma_connect(id, &conn_param);
+  ret = rdma_connect(id, &conn->conn_param);
   if (ret) {
     return ret;
   }
@@ -189,19 +208,35 @@ int sr_conn_dial(SendRcvConn conn, char *ip, int port) {
   conn->id = id;
   conn->qp = id->qp;
 
-  // ToDo: Setup MR - How do we manage memory regions?
-  size_t buf_size = 4096;
-  char* buf = (char*)malloc(buf_size);
- 
-  struct ibv_mr * mr = ibv_reg_mr(id->pd, buf, buf_size, IBV_ACCESS_REMOTE_WRITE | 
-      IBV_ACCESS_LOCAL_WRITE);  // konst: for Fabian 
-  conn->mr = mr;
+  char* buf = (char*)malloc(conn->transfer_size);
+  conn->snd_mr = ibv_reg_mr(conn->id->pd, buf, conn->transfer_size, 
+      IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);  
+
+  for (int i = conn->rcv_mr_next; i < conn->rcv_mr_count; i++){
+    char* buf = (char*)malloc(conn->transfer_size);
+    struct ibv_mr * mr = ibv_reg_mr(conn->id->pd, buf, conn->transfer_size, 
+        IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);  
+
+    struct ibv_sge sge;
+    sge.addr = (uintptr_t)mr->addr;
+    sge.length = conn->transfer_size;
+    sge.lkey = mr->lkey;
+
+    struct ibv_recv_wr wr, *bad;
+    wr.wr_id = 1;
+    wr.next = NULL;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+
+    ibv_post_recv(conn->qp, &wr, &bad);
+
+    conn->rcv_mrs[i] = mr;
+  }
   return 0;
 }
 
 int sr_conn_write(SendRcvConn conn, void *buf, size_t len){
-  // ToDo: Make send work
-  struct ibv_mr *mr = conn->mr;
+  struct ibv_mr *mr = conn->snd_mr;
 
   memcpy(mr->addr, buf, len);
 
@@ -223,20 +258,27 @@ int sr_conn_write(SendRcvConn conn, void *buf, size_t len){
 
   struct ibv_wc wc;
   while(ibv_poll_cq(conn->qp->send_cq, 1, &wc) == 0){
-    // ToDo: Only check some
-    // nothing
+    // ToDo(fischi): Add bursting
   }
-  printf("sent with status %d\n",wc.status);
   return len;
 }
 
 
 int sr_conn_read(SendRcvConn conn, void *buf, size_t len){
-  
+  struct ibv_wc wc;
+  while(ibv_poll_cq(conn->qp->recv_cq, 1, &wc) == 0){}
+
+  if (wc.status) {
+    return 0 - wc.status;
+  }
+  struct ibv_mr *mr = conn->rcv_mrs[conn->rcv_mr_next];
+  memcpy(buf, mr->addr, wc.byte_len);
+
+  // Repost MR
   struct ibv_sge sge;
-  sge.addr = (uintptr_t)conn->mr->addr;
+  sge.addr = (uintptr_t)mr->addr;
   sge.length = len;
-  sge.lkey = conn->mr->lkey;
+  sge.lkey = mr->lkey;
 
   struct ibv_recv_wr wr, *bad;
   wr.wr_id = 1;
@@ -246,14 +288,9 @@ int sr_conn_read(SendRcvConn conn, void *buf, size_t len){
 
   ibv_post_recv(conn->qp, &wr, &bad);
 
-  struct ibv_wc wc;
-  while(ibv_poll_cq(conn->qp->recv_cq, 1, &wc) == 0){}
+  // Update mr index
+  conn->rcv_mr_next = (conn->rcv_mr_next + 1) % conn->rcv_mr_count;
 
-  if (wc.status) {
-    return 0 - wc.status;
-  }
-
-  memcpy(buf, conn->mr->addr, wc.byte_len);
   return wc.byte_len;
 }
 

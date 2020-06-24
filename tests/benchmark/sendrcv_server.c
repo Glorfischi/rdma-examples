@@ -26,5 +26,11 @@ int main(int argc, char* argv[]){
     exit(EXIT_FAILURE);
   }
   printf("read %d data %s\n", ret, data);
+  ret = sr_conn_read(conn, data, 15);
+  if (ret < 0){
+    perror("Read failed");
+    exit(EXIT_FAILURE);
+  }
+  printf("read %d data %s\n", ret, data);
   return 0;
 }
