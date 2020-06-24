@@ -104,6 +104,7 @@ attr.cap.max_send_wr = 1;  // The maximum number of outstanding Work Requests th
       ibv_post_recv(qp, &wr, &bad);
     }
 
+    printf("Posted receive \n");
     struct ibv_wc wc;
     while(ibv_poll_cq(qp->recv_cq, 1, &wc) == 0){}
     printf("Received with status %d\n",wc.status);

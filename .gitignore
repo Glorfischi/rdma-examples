@@ -1,6 +1,10 @@
 # Binaries
 client
 server
+bin/
+
+# Object files
+*.o
 
 # Language server
 .clangd/
