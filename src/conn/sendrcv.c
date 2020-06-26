@@ -84,8 +84,9 @@ int sr_listener_accept(SendRcvListener listener, SendRcvConn conn){
   if(ret){
     return ret;
   }
+
   
-  ret = rdma_create_qp(conn_id, NULL, &conn->attr);
+  ret = rdma_create_qp(conn_id, listener->id->pd, &conn->attr);
   if (ret) {
     return ret;
   }
@@ -271,7 +272,10 @@ int sr_conn_read(SendRcvConn conn, void *buf, size_t len){
   if (wc.status) {
     return 0 - wc.status;
   }
+  // ToDo(fischi): Not thread safe
   struct ibv_mr *mr = conn->rcv_mrs[conn->rcv_mr_next];
+  // Update mr index
+  conn->rcv_mr_next = (conn->rcv_mr_next + 1) % conn->rcv_mr_count;
   memcpy(buf, mr->addr, wc.byte_len);
 
   // Repost MR
@@ -288,8 +292,6 @@ int sr_conn_read(SendRcvConn conn, void *buf, size_t len){
 
   ibv_post_recv(conn->qp, &wr, &bad);
 
-  // Update mr index
-  conn->rcv_mr_next = (conn->rcv_mr_next + 1) % conn->rcv_mr_count;
 
   return wc.byte_len;
 }
